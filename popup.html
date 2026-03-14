@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      width: 720px;
+      max-height: 600px;
+      font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+      background: #0d1117;
+      color: #c9d1d9;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .header {
+      padding: 10px 16px;
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+
+    .header h1 { font-size: 13px; font-weight: 600; color: #e6edf3; letter-spacing: 0.5px; }
+    .header .version { font-size: 10px; color: #484f58; }
+
+    .tab-bar {
+      display: flex;
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+      flex-shrink: 0;
+    }
+
+    .tab {
+      padding: 8px 16px;
+      font-size: 11px;
+      font-family: inherit;
+      color: #8b949e;
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      cursor: pointer;
+    }
+
+    .tab:hover { color: #c9d1d9; }
+    .tab.active { color: #58a6ff; border-bottom-color: #58a6ff; }
+
+    .tab-content { display: none; flex: 1; overflow: hidden; flex-direction: column; }
+    .tab-content.active { display: flex; }
+
+    .controls {
+      padding: 8px 16px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      border-bottom: 1px solid #30363d;
+      flex-shrink: 0;
+    }
+
+    .mode-btn, .small-btn {
+      padding: 4px 10px;
+      font-size: 10px;
+      font-family: inherit;
+      background: #21262d;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+
+    .mode-btn:hover, .small-btn:hover { background: #30363d; border-color: #484f58; }
+    .mode-btn.active { background: #1f6feb; border-color: #388bfd; color: #fff; }
+
+    .scan-btn {
+      margin-left: auto;
+      padding: 4px 14px;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: inherit;
+      background: #238636;
+      color: #fff;
+      border: 1px solid #2ea043;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+
+    .scan-btn:hover { background: #2ea043; }
+    .scan-btn:disabled { opacity: 0.5; cursor: wait; }
+
+    .output-wrap { flex: 1; overflow: auto; padding: 8px; }
+
+    .output {
+      white-space: pre;
+      font-size: 9px;
+      line-height: 1.2;
+      color: #8b949e;
+      min-height: 100%;
+      user-select: all;
+    }
+
+    .output.has-content { color: #c9d1d9; }
+
+    .meta {
+      padding: 6px 16px;
+      font-size: 10px;
+      color: #484f58;
+      border-top: 1px solid #30363d;
+      background: #161b22;
+      display: flex;
+      gap: 16px;
+      flex-shrink: 0;
+    }
+
+    .meta span { color: #58a6ff; }
+
+    .scroll-bar {
+      padding: 4px 16px;
+      font-size: 9px;
+      color: #484f58;
+      background: #0d1117;
+      border-bottom: 1px solid #21262d;
+      display: flex;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+
+    .scroll-bar .pos { color: #ffa657; }
+
+    /* ── Action Tab ───────── */
+    .action-input-area {
+      padding: 10px 16px;
+      border-bottom: 1px solid #30363d;
+      flex-shrink: 0;
+    }
+
+    .action-row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 6px;
+      align-items: center;
+    }
+
+    .action-row label { font-size: 10px; color: #8b949e; min-width: 50px; }
+
+    .action-row select, .action-row input {
+      padding: 4px 8px;
+      font-size: 11px;
+      font-family: inherit;
+      background: #0d1117;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      border-radius: 4px;
+      outline: none;
+    }
+
+    .action-row select { min-width: 100px; }
+    .action-row input { flex: 1; }
+    .action-row select:focus, .action-row input:focus { border-color: #58a6ff; }
+
+    .action-shortcuts {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+      margin-top: 6px;
+    }
+
+    .shortcut-btn {
+      padding: 3px 8px;
+      font-size: 9px;
+      font-family: inherit;
+      background: #161b22;
+      color: #8b949e;
+      border: 1px solid #30363d;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    .shortcut-btn:hover { background: #21262d; color: #c9d1d9; }
+
+    .exec-btn {
+      padding: 5px 20px;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: inherit;
+      background: #da3633;
+      color: #fff;
+      border: 1px solid #f85149;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+
+    .exec-btn:hover { background: #f85149; }
+    .exec-btn:disabled { opacity: 0.5; cursor: wait; }
+
+    .action-result { flex: 1; overflow: auto; padding: 8px 16px; }
+
+    .result-entry {
+      padding: 6px 0;
+      border-bottom: 1px solid #21262d;
+      font-size: 10px;
+    }
+
+    .result-entry .action-label { color: #ffa657; font-weight: 600; }
+    .result-entry .success { color: #7ee787; }
+    .result-entry .failure { color: #f85149; }
+
+    .result-entry .detail {
+      color: #8b949e;
+      margin-top: 2px;
+      white-space: pre-wrap;
+      max-height: 120px;
+      overflow: auto;
+      font-size: 9px;
+    }
+
+    .result-entry .new-state-toggle {
+      color: #58a6ff;
+      cursor: pointer;
+      font-size: 9px;
+      margin-top: 4px;
+      display: inline-block;
+    }
+
+    .result-entry .new-state-toggle:hover { text-decoration: underline; }
+
+    .state-preview {
+      display: none;
+      margin-top: 4px;
+      padding: 6px;
+      background: #0d1117;
+      border: 1px solid #21262d;
+      border-radius: 4px;
+      max-height: 200px;
+      overflow: auto;
+      white-space: pre;
+      font-size: 8px;
+      color: #8b949e;
+    }
+
+    .state-preview.open { display: block; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>GRAPHIC DENSITY</h1>
+    <span class="version">v0.2.0 · Phase 2</span>
+  </div>
+
+  <div class="tab-bar">
+    <button class="tab active" data-tab="state">State</button>
+    <button class="tab" data-tab="actions">Actions</button>
+    <button class="tab" data-tab="history">History</button>
+  </div>
+
+  <!-- ═══ State Tab ═══ -->
+  <div class="tab-content active" id="tab-state">
+    <div class="controls">
+      <button class="mode-btn active" data-mode="full">Full</button>
+      <button class="mode-btn" data-mode="actions_only">Actions</button>
+      <button class="mode-btn" data-mode="numbered">Numbered</button>
+      <button class="mode-btn" data-mode="numbered_v2">v2</button>
+      <button class="mode-btn" data-mode="read">Read</button>
+      <button class="small-btn" id="copyBtn">Copy</button>
+      <button class="scan-btn" id="scanBtn">Scan Page</button>
+    </div>
+    <div class="scroll-bar" id="scrollBar">
+      Scroll: <span class="pos" id="scrollPos">-</span>
+      Page: <span class="pos" id="scrollPage">-</span>
+    </div>
+    <div class="output-wrap">
+      <pre class="output" id="output">Click "Scan Page" to render the current tab.</pre>
+    </div>
+    <div class="meta">
+      <div>Elements: <span id="metaTotal">-</span></div>
+      <div>Interactive: <span id="metaInteractive">-</span></div>
+      <div>Tokens: <span id="metaTokens">-</span></div>
+      <div>Type: <span id="metaType">-</span></div>
+    </div>
+  </div>
+
+  <!-- ═══ Actions Tab ═══ -->
+  <div class="tab-content" id="tab-actions">
+    <div class="action-input-area">
+      <div class="action-row">
+        <label>Action</label>
+        <select id="actionType">
+          <option value="click">click</option>
+          <option value="fill">fill</option>
+          <option value="clear">clear</option>
+          <option value="select">select</option>
+          <option value="hover">hover</option>
+          <option value="focus">focus</option>
+          <option value="scroll">scroll</option>
+          <option value="keypress">keypress</option>
+          <option value="back">back</option>
+          <option value="forward">forward</option>
+        </select>
+        <label>Element</label>
+        <input type="number" id="actionElement" placeholder="#" style="width: 55px; flex: none;">
+        <button class="exec-btn" id="execBtn">Execute</button>
+      </div>
+      <div class="action-row">
+        <label>Value</label>
+        <input type="text" id="actionValue" placeholder="Value for fill/select · direction for scroll · key for keypress">
+      </div>
+      <div class="action-shortcuts">
+        <button class="shortcut-btn" data-action='{"action":"scroll","direction":"down"}'>↓ Down</button>
+        <button class="shortcut-btn" data-action='{"action":"scroll","direction":"up"}'>↑ Up</button>
+        <button class="shortcut-btn" data-action='{"action":"scroll","direction":"top"}'>⤒ Top</button>
+        <button class="shortcut-btn" data-action='{"action":"scroll","direction":"bottom"}'>⤓ Bottom</button>
+        <button class="shortcut-btn" data-action='{"action":"back"}'>← Back</button>
+        <button class="shortcut-btn" data-action='{"action":"forward"}'>→ Fwd</button>
+        <button class="shortcut-btn" data-action='{"action":"keypress","key":"Escape"}'>Esc</button>
+        <button class="shortcut-btn" data-action='{"action":"keypress","key":"Enter"}'>Enter</button>
+        <button class="shortcut-btn" data-action='{"action":"keypress","key":"Tab"}'>Tab</button>
+      </div>
+    </div>
+    <div class="action-result" id="actionResults">
+      <div style="color: #484f58; font-size: 10px; padding: 20px 0; text-align: center;">
+        Scan a page first, then execute actions by element number.<br>
+        Each action returns the new page state automatically.
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ History Tab ═══ -->
+  <div class="tab-content" id="tab-history">
+    <div class="controls" style="justify-content: space-between;">
+      <span style="font-size: 11px; color: #8b949e;">Action History</span>
+      <div style="display: flex; gap: 8px;">
+        <button class="small-btn" id="refreshHistory">Refresh</button>
+        <button class="small-btn" id="clearHistory">Clear</button>
+        <button class="small-btn" id="copyHistory">Copy JSON</button>
+      </div>
+    </div>
+    <div class="action-result" id="historyList">
+      <div style="color: #484f58; font-size: 10px; padding: 20px 0; text-align: center;">
+        No actions recorded yet.
+      </div>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
