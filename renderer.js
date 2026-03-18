@@ -1,5 +1,5 @@
 /**
- * Graphic Density Renderer v0.2
+ * Graphic Density Renderer v0.3
  * Converts live DOM into spatial text representations for AI consumption.
  * 
  * Render modes:
@@ -8,6 +8,9 @@
  *   - "numbered"     → interactive elements labeled with numbers + coordinate registry
  *   - "numbered_v2"  → numbered + interaction hints, form groups, layer info
  *   - "read"         → numbered_v2 + readable text content + table extraction
+ *   - "oneshot"      → full page scan (beyond viewport) with section markers
+ *   - "flow"         → scan hidden DOM elements for multi-step form detection
+ *   - "diff"         → only return what changed since last scan
  */
 
 (() => {
@@ -21,6 +24,8 @@
     // Maximum grid dimensions (prevents runaway on huge pages)
     maxCols: 140,
     maxRows: 80,
+    // For oneshot mode: max page height in viewports (prevents infinite scroll explosion)
+    maxPageViewports: 6,
     // Minimum element size to include (pixels)
     minElementWidth: 8,
     minElementHeight: 8,
@@ -1181,6 +1186,419 @@
     return grid.map(row => row.join('')).join('\n');
   }
 
+  // ── v0.3: One-Shot Full Page Scan ───────────────────────────────
+  // Scans the entire page (not just viewport) with section markers.
+  // The model gets global context to plan before executing.
+
+  function renderOneShot(elements) {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const docHeight = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+    const totalViewports = Math.min(
+      Math.ceil(docHeight / vh),
+      CONFIG.maxPageViewports
+    );
+    const totalPageHeight = vh * totalViewports;
+
+    const cols = Math.min(CONFIG.maxCols, Math.floor(vw / CONFIG.cellWidth));
+    const rowsPerViewport = Math.min(CONFIG.maxRows, Math.floor(vh / CONFIG.cellHeight));
+    const totalRows = rowsPerViewport * totalViewports;
+
+    // Scan full page elements (not viewport-only)
+    const allElements = scanElements(false);
+    const interactive = allElements.filter(e => e.interactive);
+    const registry = [];
+
+    // Build sections
+    const sections = [];
+
+    for (let vp = 0; vp < totalViewports; vp++) {
+      const vpTop = vp * vh;
+      const vpBottom = vpTop + vh;
+      const grid = createGrid(cols, rowsPerViewport);
+
+      // Filter elements in this viewport section
+      const vpElements = interactive.filter(el => {
+        const absTop = el.rect.top + window.scrollY;
+        return absTop >= vpTop && absTop < vpBottom;
+      });
+
+      const currentScrollY = window.scrollY;
+      const isCurrentViewport = currentScrollY >= vpTop && currentScrollY < vpBottom;
+
+      vpElements.forEach(el => {
+        const num = registry.length + 1;
+
+        // Adjust rect to be relative to this viewport section
+        const absTop = el.rect.top + currentScrollY;
+        const relRect = {
+          left: el.rect.left,
+          top: absTop - vpTop,
+          right: el.rect.right,
+          bottom: (absTop - vpTop) + el.rect.height,
+          width: el.rect.width,
+          height: el.rect.height,
+        };
+
+        const g = mapToGrid(relRect, cols, rowsPerViewport, vw, vh);
+        const tag = `[${num}]`;
+
+        // Place number on grid
+        const row = Math.min(g.startRow, rowsPerViewport - 1);
+        let col = g.startCol;
+        for (let i = 0; i < tag.length && col + i < cols; i++) {
+          grid[row][col + i] = tag[i];
+        }
+
+        if (el.type === 'button') {
+          for (let r = g.startRow; r <= g.endRow && r < rowsPerViewport; r++) {
+            for (let c = g.startCol; c <= g.endCol && c < cols; c++) {
+              if (grid[r][c] === DENSITY.empty) grid[r][c] = DENSITY.buttonFill;
+            }
+          }
+          for (let i = 0; i < tag.length && col + i < cols; i++) {
+            grid[row][col + i] = tag[i];
+          }
+        }
+
+        const entry = {
+          id: num,
+          type: el.type,
+          label: el.label,
+          rect: el.rect,
+          section: vp + 1,
+          center: {
+            x: Math.round(el.rect.left + el.rect.width / 2),
+            y: Math.round(absTop + el.rect.height / 2),
+          },
+          node: el.node,
+        };
+
+        if (el.type === 'scroll_container') {
+          entry.scrollable = el.scrollable;
+          entry.scrollState = el.scrollState;
+        }
+
+        entry.actions = getActionHints(el.node, el.type);
+        const formGroup = getFormGroup(el.node);
+        if (formGroup) entry.form = formGroup;
+
+        registry.push(entry);
+      });
+
+      sections.push({
+        viewport: vp + 1,
+        isCurrent: isCurrentViewport,
+        elementCount: vpElements.length,
+        map: gridToString(grid),
+      });
+    }
+
+    // Build combined output
+    let combinedMap = '';
+    for (const section of sections) {
+      const marker = section.isCurrent ? '(current)' : '';
+      combinedMap += `── section ${section.viewport}/${totalViewports} ${marker} ──\n`;
+      combinedMap += section.map + '\n\n';
+    }
+
+    return {
+      map: combinedMap,
+      registry,
+      sections: sections.map(s => ({
+        viewport: s.viewport,
+        isCurrent: s.isCurrent,
+        elementCount: s.elementCount,
+      })),
+      meta: {
+        viewport: { width: vw, height: vh },
+        documentHeight: docHeight,
+        totalViewports,
+        gridSize: { cols, rowsPerViewport },
+        elementCount: registry.length,
+      },
+    };
+  }
+
+  // ── v0.3: State Diff ───────────────────────────────────────────
+  // Stores the last rendered state and returns only what changed.
+  // Massively reduces tokens on subsequent scans of the same page.
+
+  let lastStateSnapshot = null;
+
+  function computeStateDiff(currentState) {
+    if (!lastStateSnapshot) {
+      // First scan — no diff available, return full state
+      lastStateSnapshot = {
+        url: currentState.url,
+        map: currentState.map,
+        registry: currentState.registry,
+        timestamp: Date.now(),
+      };
+      return {
+        type: 'full',
+        state: currentState,
+      };
+    }
+
+    // Check if we're on a different page
+    if (lastStateSnapshot.url !== currentState.url) {
+      lastStateSnapshot = {
+        url: currentState.url,
+        map: currentState.map,
+        registry: currentState.registry,
+        timestamp: Date.now(),
+      };
+      return {
+        type: 'new_page',
+        state: currentState,
+      };
+    }
+
+    // Same page — compute diff
+    const oldMap = lastStateSnapshot.map || '';
+    const newMap = currentState.map || '';
+    const oldLines = oldMap.split('\n');
+    const newLines = newMap.split('\n');
+
+    const changedLines = [];
+    const maxLines = Math.max(oldLines.length, newLines.length);
+
+    for (let i = 0; i < maxLines; i++) {
+      const oldLine = oldLines[i] || '';
+      const newLine = newLines[i] || '';
+      if (oldLine !== newLine) {
+        changedLines.push({ line: i, content: newLine });
+      }
+    }
+
+    // Registry diff — find added, removed, changed elements
+    const oldRegistry = lastStateSnapshot.registry || [];
+    const newRegistry = currentState.registry || [];
+
+    const oldIds = new Set(oldRegistry.map(e => `${e.type}:${e.label}:${Math.round(e.center?.x/20)},${Math.round(e.center?.y/20)}`));
+    const newIds = new Set(newRegistry.map(e => `${e.type}:${e.label}:${Math.round(e.center?.x/20)},${Math.round(e.center?.y/20)}`));
+
+    const added = newRegistry.filter(e => {
+      const key = `${e.type}:${e.label}:${Math.round(e.center?.x/20)},${Math.round(e.center?.y/20)}`;
+      return !oldIds.has(key);
+    });
+
+    const removed = oldRegistry.filter(e => {
+      const key = `${e.type}:${e.label}:${Math.round(e.center?.x/20)},${Math.round(e.center?.y/20)}`;
+      return !newIds.has(key);
+    });
+
+    // Update snapshot
+    lastStateSnapshot = {
+      url: currentState.url,
+      map: currentState.map,
+      registry: currentState.registry,
+      timestamp: Date.now(),
+    };
+
+    const totalLines = newLines.length;
+    const unchangedPercent = totalLines > 0
+      ? Math.round(((totalLines - changedLines.length) / totalLines) * 100)
+      : 0;
+
+    // If more than 70% changed, just send the full state (cheaper than a huge diff)
+    if (changedLines.length > totalLines * 0.7) {
+      return {
+        type: 'major_change',
+        state: currentState,
+        stats: { changedLines: changedLines.length, totalLines, unchangedPercent },
+      };
+    }
+
+    // Build compact diff output
+    let diffMap = '';
+    if (changedLines.length > 0) {
+      // Group consecutive changed lines into regions
+      const regions = [];
+      let currentRegion = null;
+
+      for (const cl of changedLines) {
+        if (currentRegion && cl.line === currentRegion.end + 1) {
+          currentRegion.end = cl.line;
+          currentRegion.lines.push(cl.content);
+        } else {
+          if (currentRegion) regions.push(currentRegion);
+          currentRegion = { start: cl.line, end: cl.line, lines: [cl.content] };
+        }
+      }
+      if (currentRegion) regions.push(currentRegion);
+
+      for (const region of regions) {
+        diffMap += `[changed: rows ${region.start}-${region.end}]\n`;
+        diffMap += region.lines.join('\n') + '\n';
+      }
+    }
+
+    return {
+      type: 'diff',
+      url: currentState.url,
+      title: currentState.title,
+      diff: {
+        map: diffMap || '[no visual changes]',
+        added: added.map(({ node, ...rest }) => rest),
+        removed: removed.map(({ node, ...rest }) => rest),
+      },
+      scroll: currentState.scroll,
+      stats: {
+        changedLines: changedLines.length,
+        totalLines,
+        unchangedPercent,
+        elementsAdded: added.length,
+        elementsRemoved: removed.length,
+      },
+      // Always include full registry so agent can still target elements
+      registry: currentState.registry,
+    };
+  }
+
+  function resetDiffState() {
+    lastStateSnapshot = null;
+    return { success: true };
+  }
+
+  // ── v0.3: Hidden DOM Flow Scan ─────────────────────────────────
+  // Scans hidden elements (display:none, visibility:hidden) to find
+  // multi-step form flows that exist in DOM but aren't visible.
+  // Lets the model plan an entire form sequence in one call.
+
+  function scanHiddenFlow() {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+
+    // Find all interactive elements including hidden ones
+    const visibleElements = [];
+    const hiddenElements = [];
+
+    const walker = document.createTreeWalker(
+      document.body,
+      NodeFilter.SHOW_ELEMENT,
+      null,
+    );
+
+    let node;
+    while (node = walker.nextNode()) {
+      const type = classifyElement(node);
+      if (type === 'unknown' || type === 'container') continue;
+      if (!isInteractive(type)) continue;
+
+      const rect = node.getBoundingClientRect();
+      const label = getElementLabel(node, type);
+      if (!label && type !== 'input') continue;
+
+      const style = window.getComputedStyle(node);
+      const isHidden = style.display === 'none'
+        || style.visibility === 'hidden'
+        || style.opacity === '0'
+        || rect.width === 0
+        || rect.height === 0
+        || !isInViewport(rect);
+
+      // Try to find the containing step/section
+      const stepInfo = findFlowStep(node);
+
+      const entry = {
+        type,
+        label,
+        hidden: isHidden,
+        step: stepInfo,
+        actions: getActionHints(node, type),
+      };
+
+      const formGroup = getFormGroup(node);
+      if (formGroup) entry.form = formGroup;
+
+      if (isHidden) {
+        hiddenElements.push(entry);
+      } else {
+        entry.rect = {
+          left: rect.left, top: rect.top,
+          right: rect.right, bottom: rect.bottom,
+        };
+        visibleElements.push(entry);
+      }
+    }
+
+    // Group hidden elements by their step
+    const steps = {};
+    for (const el of [...visibleElements, ...hiddenElements]) {
+      const stepName = el.step || (el.hidden ? 'hidden' : 'visible');
+      if (!steps[stepName]) steps[stepName] = [];
+      steps[stepName].push(el);
+    }
+
+    // Format as a flow
+    const flow = [];
+    for (const [stepName, elements] of Object.entries(steps)) {
+      const isVisible = elements.some(e => !e.hidden);
+      flow.push({
+        step: stepName,
+        visible: isVisible,
+        elements: elements.map(e => ({
+          type: e.type,
+          label: e.label,
+          actions: e.actions,
+          form: e.form,
+        })),
+      });
+    }
+
+    return {
+      flow,
+      totalSteps: flow.length,
+      visibleSteps: flow.filter(s => s.visible).length,
+      hiddenSteps: flow.filter(s => !s.visible).length,
+      totalElements: visibleElements.length + hiddenElements.length,
+      hiddenElements: hiddenElements.length,
+    };
+  }
+
+  function findFlowStep(node) {
+    // Walk up the tree looking for step indicators
+    let el = node.parentElement;
+    let depth = 0;
+
+    while (el && depth < 10) {
+      // Check for common step patterns
+      const cls = el.className?.toString()?.toLowerCase() || '';
+      const id = el.id?.toLowerCase() || '';
+      const role = el.getAttribute('role');
+      const ariaLabel = el.getAttribute('aria-label');
+
+      // Step indicator patterns
+      const stepPatterns = [
+        'step', 'wizard', 'stage', 'phase', 'tab-panel', 'tabpanel',
+        'section', 'fieldset', 'panel', 'slide', 'page',
+      ];
+
+      for (const pattern of stepPatterns) {
+        if (cls.includes(pattern) || id.includes(pattern)) {
+          // Try to get a meaningful name
+          const name = ariaLabel
+            || el.getAttribute('data-step')
+            || el.getAttribute('data-label')
+            || el.getAttribute('title')
+            || `${pattern}:${id || cls.substring(0, 20)}`;
+          return name.substring(0, 40);
+        }
+      }
+
+      if (role === 'tabpanel') {
+        return ariaLabel || `tabpanel:${id || 'unnamed'}`;
+      }
+
+      el = el.parentElement;
+      depth++;
+    }
+
+    return null;
+  }
+
   // ── Public API ─────────────────────────────────────────────────
 
   function getPageRepresentation(mode = 'full') {
@@ -1247,6 +1665,52 @@
           content: result.content,
           tables: result.tables,
           meta: result.meta,
+        };
+        break;
+      }
+
+      case 'oneshot': {
+        const result = renderOneShot(elements);
+        const serializedRegistry = result.registry.map(({ node, ...rest }) => rest);
+        output = {
+          url,
+          title,
+          mode,
+          map: result.map,
+          registry: serializedRegistry,
+          sections: result.sections,
+          meta: result.meta,
+        };
+        break;
+      }
+
+      case 'diff': {
+        // Get current numbered state, then diff against last snapshot
+        const result = renderRead(elements);
+        const serializedRegistry = result.registry.map(({ node, ...rest }) => rest);
+        const currentState = {
+          url,
+          title,
+          mode: 'diff',
+          map: result.map,
+          registry: serializedRegistry,
+          content: result.content,
+          tables: result.tables,
+          meta: result.meta,
+          scroll: getScrollContext(),
+        };
+        const diffResult = computeStateDiff(currentState);
+        output = diffResult;
+        break;
+      }
+
+      case 'flow': {
+        const flowResult = scanHiddenFlow();
+        output = {
+          url,
+          title,
+          mode,
+          flow: flowResult,
         };
         break;
       }
@@ -1928,6 +2392,18 @@
       return true;
     }
 
+    // v0.3: Reset diff baseline
+    if (msg.type === 'RESET_DIFF') {
+      sendResponse(resetDiffState());
+      return true;
+    }
+
+    // v0.3: Flow scan (hidden DOM)
+    if (msg.type === 'GET_FLOW') {
+      sendResponse(scanHiddenFlow());
+      return true;
+    }
+
     // Environment summary
     if (msg.type === 'GET_ENVIRONMENT') {
       const elements = scanElements(true);
@@ -1948,7 +2424,7 @@
     }
 
     if (msg.type === 'PING') {
-      sendResponse({ status: 'alive', phase: 2, registrySize: currentRegistry?.length || 0 });
+      sendResponse({ status: 'alive', version: '0.3.0', registrySize: currentRegistry?.length || 0 });
       return true;
     }
   });
@@ -1981,6 +2457,10 @@
     scanElements,
     scanTextContent,
     scanTables,
+    scanHiddenFlow,
+    renderOneShot,
+    computeStateDiff,
+    resetDiffState,
     getScrollContext,
     getActionHistory,
     clearActionHistory,
@@ -1988,5 +2468,5 @@
     CONFIG,
   };
 
-  console.log('[Graphic Density v0.2] Modes: full, actions_only, numbered, numbered_v2, read | Actions: click, fill, clear, select, hover, focus, scroll, keypress, back, forward, wait');
+  console.log('[Graphic Density v0.3] Modes: full, actions_only, numbered, numbered_v2, read, oneshot, diff, flow');
 })();
